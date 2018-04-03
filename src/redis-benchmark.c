@@ -48,6 +48,15 @@
 
 #define UNUSED(V) ((void) V)
 #define RANDPTR_INITIAL_SIZE 8
+/* command, standard-rps, time since start, total completed, multiplier, last
+ * second count, m*lsc
+ * We pad the short with a few extra whitespace characters to ensure that we
+ * don't get bleedthrough for quickly changing rates. Rare, but possible for
+ * hung clients. In practice think 99m vs. 0, or 11 total digits vs 4.
+ * */
+
+static char throughput_line[] =       "%s,%.2f,%.3f,%d,%.3f,%u,%.2f\n";
+static char throughput_line_short[] = "%s: %.2f       \r";
 
 static struct config {
     aeEventLoop *el;
@@ -79,6 +88,15 @@ static struct config {
     sds dbnumstr;
     char *tests;
     char *auth;
+#if !SKIP_SSL_EVERYTHING
+    int ssl;
+    int no_ssl_latency;
+    const char* pubkey;
+    const char* cert;
+#endif
+    uint64_t last_request;
+    uint32_t last_second_count;
+    uint32_t last_second[1000];
 } config;
 
 typedef struct _client {
@@ -95,11 +113,13 @@ typedef struct _client {
                                such as auth and select are prefixed to the pipeline of
                                benchmark commands and discarded after the first send. */
     int prefixlen;          /* Size in bytes of the pending prefix commands */
+    int needs_init;         /* set to 1 if we need to randomize the write buffer */
 } *client;
 
 /* Prototypes */
 static void writeHandler(aeEventLoop *el, int fd, void *privdata, int mask);
 static void createMissingClients(client c);
+void ssl_wrap_socket(redisContext *c);
 
 /* Implementation */
 static long long ustime(void) {
@@ -151,6 +171,7 @@ static void resetClient(client c) {
     aeDeleteFileEvent(config.el,c->context->fd,AE_READABLE);
     aeCreateFileEvent(config.el,c->context->fd,AE_WRITABLE,writeHandler,c);
     c->written = 0;
+    c->needs_init = 1;
     c->pending = config.pipeline;
 }
 
@@ -186,8 +207,33 @@ static void clientDone(client c) {
     }
 }
 
+static void updateLastSecond(uint64_t msnow) {
+    unsigned ms = msnow % 1000;
+    if ((msnow - config.last_request) >= 1000) {
+        memset(config.last_second, 0, sizeof(config.last_second));
+        config.last_second_count = 0;
+    } else if (msnow != config.last_request) {
+        int en = (config.last_request) % 1000;
+        int st = ms;
+        do {
+            config.last_second_count -= config.last_second[st];
+            config.last_second[st] = 0;
+            if (!st) st = 999;
+            else st--;
+        } while (en != st);
+    }
+
+    config.last_second_count++;
+    config.last_second[ms]++;
+    config.last_request = msnow;
+}
+
 static void readHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     client c = privdata;
+#if !SKIP_SSL_EVERYTHING
+    struct ssl_client *ssl = c->context->ssl;
+    int hsd = (!!ssl) && !ssl->handshake_done;
+#endif
     void *reply = NULL;
     UNUSED(el);
     UNUSED(fd);
@@ -196,11 +242,20 @@ static void readHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     /* Calculate latency only for the first read event. This means that the
      * server already sent the reply and we need to parse it. Parsing overhead
      * is not part of the latency, so calculate it only once, here. */
-    if (c->latency < 0) c->latency = ustime()-(c->start);
+    uint64_t now = ustime();
+    if (c->latency < 0) c->latency = now - (c->start);
 
     if (redisBufferRead(c->context) != REDIS_OK) {
         fprintf(stderr,"Error: %s\n",c->context->errstr);
         exit(1);
+#if !SKIP_SSL_EVERYTHING
+    } else if (ssl && hsd && ssl->handshake_done) {
+        /* Just finished with the handshake; add the write handler again so we
+         * can actually write our request :P */
+        aeDeleteFileEvent(config.el,c->context->fd,AE_WRITABLE);
+        aeCreateFileEvent(config.el,c->context->fd,AE_WRITABLE,writeHandler,c);
+        c->needs_init = config.no_ssl_latency;
+#endif
     } else {
         while(c->pending) {
             if (redisGetReply(c->context,&reply) != REDIS_OK) {
@@ -241,8 +296,10 @@ static void readHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
                     continue;
                 }
 
-                if (config.requests_finished < config.requests)
+                if (config.requests_finished < config.requests) {
                     config.latency[config.requests_finished++] = c->latency;
+                    updateLastSecond(now / 1000);
+                }
                 c->pending--;
                 if (c->pending == 0) {
                     clientDone(c);
@@ -262,7 +319,7 @@ static void writeHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(mask);
 
     /* Initialize request when nothing was written. */
-    if (c->written == 0) {
+    if (c->needs_init) {
         /* Enforce upper bound to number of requests. */
         if (config.requests_issued++ >= config.requests) {
             freeClient(c);
@@ -273,7 +330,53 @@ static void writeHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
         if (config.randomkeys) randomizeClientKey(c);
         c->start = ustime();
         c->latency = -1;
+        c->needs_init = 0;
     }
+
+#if !SKIP_SSL_EVERYTHING
+    if (c->context->ssl) {
+        redisContext* co = c->context;
+        struct ssl_client* ssl = co->ssl;
+
+        if ((!ssl->handshake_done) && hiredis_ssl_do_handshake(ssl) == SSLSTATUS_FAIL) {
+            fprintf(stderr, "handshake failed: %i\n", co->fd);
+            freeClient(c);
+            return;
+        }
+
+        if (ssl->handshake_done) {
+            if (!sdslen(ssl->write_buf) && ((size_t)c->written) < ((size_t)sdslen(c->obuf)) && sdslen(ssl->encrypt_buf) < 16384) {
+                /* ssl is out of write buffer to the socket, pump some to encrypt */
+                int w = (int)(((sdslen(c->obuf) - c->written) > 16384) ? 16384 : (sdslen(c->obuf) - c->written));
+                ssl_buffer_unencrypted(ssl, c->obuf + c->written, w, 0);
+                c->written += w;
+            }
+
+            if (sdslen(ssl->encrypt_buf) > 0) {
+                /* encrypt anything that is in the buffer to encrypt */
+                ssl_do_encrypt(ssl);
+            }
+        }
+
+        if (sdslen(ssl->write_buf) && ssl_do_sock_write(ssl, 1) == -1) {
+            fprintf(stderr, "Writing to ssl socket failed: %i\n", co->fd);
+            freeClient(c);
+            return;
+        }
+        if (!ssl->handshake_done) {
+            if (!sdslen(ssl->write_buf)) {
+                /* make sure we can make progress on the handshake / etc. */
+                aeDeleteFileEvent(config.el,co->fd,AE_WRITABLE);
+                aeCreateFileEvent(config.el,co->fd,AE_READABLE,readHandler,c);
+            }
+        }
+
+        if (c->written == sdslen(c->obuf) && !sdslen(ssl->write_buf) && !sdslen(ssl->encrypt_buf) && ssl->handshake_done) {
+            aeDeleteFileEvent(config.el,co->fd,AE_WRITABLE);
+            aeCreateFileEvent(config.el,co->fd,AE_READABLE,readHandler,c);
+        }
+    } else
+#endif
 
     if (sdslen(c->obuf) > c->written) {
         void *ptr = c->obuf+c->written;
@@ -316,7 +419,9 @@ static void writeHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
 static client createClient(char *cmd, size_t len, client from) {
     int j;
     client c = zmalloc(sizeof(struct _client));
+    int tries_remain = 3;
 
+try_again:
     if (config.hostsocket == NULL) {
         c->context = redisConnectNonBlock(config.hostip,config.hostport);
     } else {
@@ -328,8 +433,27 @@ static client createClient(char *cmd, size_t len, client from) {
             fprintf(stderr,"%s:%d: %s\n",config.hostip,config.hostport,c->context->errstr);
         else
             fprintf(stderr,"%s: %s\n",config.hostsocket,c->context->errstr);
+
+#if !SKIP_SSL_EVERYTHING
+do_retry:
+#endif
+        if (tries_remain--) {
+            redisFree(c->context);
+            goto try_again;
+        }
         exit(1);
     }
+
+#if !SKIP_SSL_EVERYTHING
+    if (config.ssl && !config.hostsocket) {
+        ssl_wrap_socket(c->context);
+        if (!c->context->ssl) {
+            fprintf(stderr,"couldn't initialize SSL\n");
+            goto do_retry;
+        }
+    }
+#endif
+
     /* Suppress hiredis cleanup of unused buffers for max speed. */
     c->context->reader->maxbuf = 0;
 
@@ -370,6 +494,11 @@ static client createClient(char *cmd, size_t len, client from) {
     }
 
     c->written = 0;
+#if !SKIP_SSL_EVERYTHING
+    c->needs_init = !config.no_ssl_latency;
+#else
+    c->needs_init = 1;
+#endif
     c->pending = config.pipeline+c->prefix_pending;
     c->randptr = NULL;
     c->randlen = 0;
@@ -403,8 +532,9 @@ static client createClient(char *cmd, size_t len, client from) {
             }
         }
     }
-    if (config.idlemode == 0)
+    if (config.idlemode == 0) {
         aeCreateFileEvent(config.el,c->context->fd,AE_WRITABLE,writeHandler,c);
+    }
     listAddNodeTail(config.clients,c);
     config.liveclients++;
     return c;
@@ -428,7 +558,12 @@ static int compareLatency(const void *a, const void *b) {
     return (*(long long*)a)-(*(long long*)b);
 }
 
-static void showLatencyReport(void) {
+/* percent, ms, count<=ms */
+static char less_than_latency[] =       "%.6f,%d,%d  \n";
+static char less_than_latency_short[] = "%.6f%% <= %d\n";
+
+static void
+showLatencyReport(void) {
     int i, curlat = 0;
     float perc, reqpersec;
 
@@ -447,7 +582,7 @@ static void showLatencyReport(void) {
             if (config.latency[i]/1000 != curlat || i == (config.requests-1)) {
                 curlat = config.latency[i]/1000;
                 perc = ((float)(i+1)*100)/config.requests;
-                printf("%.2f%% <= %d milliseconds\n", perc, curlat);
+                printf(less_than_latency, perc, curlat, i+1);
             }
         }
         printf("%.2f requests per second\n\n", reqpersec);
@@ -464,11 +599,13 @@ static void benchmark(char *title, char *cmd, int len) {
     config.title = title;
     config.requests_issued = 0;
     config.requests_finished = 0;
+    config.last_second_count = 0;
+    memset(config.last_second, 0, sizeof(config.last_second));
 
     c = createClient(cmd,len,NULL);
     createMissingClients(c);
 
-    config.start = mstime();
+    config.start = config.last_request = mstime();
     aeMain(config.el);
     config.totlatency = mstime()-config.start;
 
@@ -481,6 +618,7 @@ int parseOptions(int argc, const char **argv) {
     int i;
     int lastarg;
     int exit_status = 1;
+    int full_benchmark = 0;
 
     for (i = 1; i < argc; i++) {
         lastarg = (i == (argc-1));
@@ -546,6 +684,20 @@ int parseOptions(int argc, const char **argv) {
             if (lastarg) goto invalid;
             config.dbnum = atoi(argv[++i]);
             config.dbnumstr = sdsfromlonglong(config.dbnum);
+        } else if (!strcmp(argv[i],"--more-metrics")) {
+            full_benchmark = 1;
+#if !SKIP_SSL_EVERYTHING
+        } else if (!strcmp(argv[i],"--ssl")) {
+            config.ssl = 1;
+        } else if (!strcmp(argv[i],"--no-ssl-latency")) {
+            config.no_ssl_latency = 1;
+        } else if (!strcmp(argv[i],"--pub")) {
+            if (lastarg) goto invalid;
+            config.pubkey = argv[++i];
+        } else if (!strcmp(argv[i],"--cert")) {
+            if (lastarg) goto invalid;
+            config.cert = argv[++i];
+#endif
         } else if (!strcmp(argv[i],"--help")) {
             exit_status = 0;
             goto usage;
@@ -556,6 +708,10 @@ int parseOptions(int argc, const char **argv) {
             if (argv[i][0] == '-') goto invalid;
             return i;
         }
+    }
+    if (!full_benchmark) {
+        memcpy(throughput_line, throughput_line_short, strlen(throughput_line_short)+1);
+        memcpy(less_than_latency, less_than_latency_short, strlen(less_than_latency_short));
     }
 
     return i;
@@ -589,7 +745,13 @@ usage:
 " -l                 Loop. Run the tests forever\n"
 " -t <tests>         Only run the comma separated list of tests. The test\n"
 "                    names are the same as the ones produced as output.\n"
-" -I                 Idle mode. Just open N idle connections and wait.\n\n"
+" -I                 Idle mode. Just open N idle connections and wait.\n"
+" --more-metrics     Produces more metrics to better analyze performance.\n"
+" --ssl              Enable SSL/TLS client mode, see --pub/--cert for server\n"
+"                    verification\n"
+" --no-ssl-latency   Don't count TLS/SSL negotiation time in latency counts\n"
+" --pub              The public key to verify the server against\n"
+" --cert             The cert to verify the server against\n"
 "Examples:\n\n"
 " Run the benchmark with the default configuration against 127.0.0.1:6379:\n"
 "   $ redis-benchmark\n\n"
@@ -626,7 +788,17 @@ int showThroughput(struct aeEventLoop *eventLoop, long long id, void *clientData
     }
     float dt = (float)(mstime()-config.start)/1000.0;
     float rps = (float)config.requests_finished/dt;
-    printf("%s: %.2f\r", config.title, rps);
+    float mdt = dt < 1.0 ? 1.0 / ((dt > 0.0) ? dt : .001) : 1.0;
+    /* command, standard-rps, time since start, total completed, multiplier, last second count, m*lsc */
+
+    printf(throughput_line,
+           config.title,                    // command
+           rps,                             // average requests/second since start
+           dt,                              // time since start, --fb only here down
+           config.requests_finished,        // requests finished since start
+           mdt,                             // multiplier, for first second
+           config.last_second_count,        // real number completed in last second
+           mdt * config.last_second_count); // last two, multiplied together
     fflush(stdout);
     return 250; /* every 250ms */
 }
@@ -679,6 +851,12 @@ int main(int argc, const char **argv) {
     config.tests = NULL;
     config.dbnum = 0;
     config.auth = NULL;
+#if !SKIP_SSL_EVERYTHING
+    config.ssl = 0;
+    config.no_ssl_latency = 0;
+    config.pubkey = NULL;
+    config.cert = NULL;
+#endif
 
     i = parseOptions(argc,argv);
     argc -= i;
@@ -714,6 +892,11 @@ int main(int argc, const char **argv) {
 
         return 0;
     }
+#if !SKIP_SSL_EVERYTHING
+    if (config.ssl) {
+        hiredis_ssl_init(config.cert, config.pubkey);
+    }
+#endif
 
     /* Run default benchmark suite. */
     data = zmalloc(config.datasize+1);
@@ -816,8 +999,8 @@ int main(int argc, const char **argv) {
         }
 
         if (test_is_selected("lrange") || test_is_selected("lrange_500")) {
-            len = redisFormatCommand(&cmd,"LRANGE mylist 0 449");
-            benchmark("LRANGE_500 (first 450 elements)",cmd,len);
+            len = redisFormatCommand(&cmd,"LRANGE mylist 0 499");
+            benchmark("LRANGE_500 (first 500 elements)",cmd,len);
             free(cmd);
         }
 

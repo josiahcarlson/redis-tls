@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2014, Pieter Noordhuis <pcnoordhuis at gmail dot com>
  * Copyright (c) 2015, Matt Stancliff <matt at genges dot com>,
  *                     Jan-Erik Rediger <janerik at fnordig dot com>
+ * Copyright (c) 2018, Josiah Carlson <josiah dot carlson at gmail dot com>
  *
  * All rights reserved.
  *
@@ -29,6 +30,7 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
+ *
  */
 
 #include "fmacros.h"
@@ -40,6 +42,7 @@
 #include <ctype.h>
 
 #include "hiredis.h"
+#include "ssl_hiredis.h"
 #include "net.h"
 #include "sds.h"
 
@@ -48,6 +51,11 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
 static void *createArrayObject(const redisReadTask *task, int elements);
 static void *createIntegerObject(const redisReadTask *task, long long value);
 static void *createNilObject(const redisReadTask *task);
+
+#if !SKIP_SSL_EVERYTHING
+void ssl_wrap_socket(redisContext *c);
+#endif
+
 
 /* Default set of functions to build the reply. Keep in mind that such a
  * function returning NULL is interpreted as OOM. */
@@ -604,6 +612,9 @@ static redisContext *redisContextInit(void) {
     c->tcp.source_addr = NULL;
     c->unix_sock.path = NULL;
     c->timeout = NULL;
+#if !SKIP_SSL_EVERYTHING
+    c->ssl = NULL;
+#endif
 
     if (c->obuf == NULL || c->reader == NULL) {
         redisFree(c);
@@ -630,6 +641,10 @@ void redisFree(redisContext *c) {
         free(c->unix_sock.path);
     if (c->timeout)
         free(c->timeout);
+#if !SKIP_SSL_EVERYTHING
+    if (c->ssl)
+        ssl_client_cleanup(c->ssl);
+#endif
     free(c);
 }
 
@@ -650,6 +665,13 @@ int redisReconnect(redisContext *c) {
 
     sdsfree(c->obuf);
     redisReaderFree(c->reader);
+
+#if !SKIP_SSL_EVERYTHING
+    if (c->ssl) {
+        ssl_client_cleanup(c->ssl);
+        c->ssl = NULL;
+    }
+#endif
 
     c->obuf = sdsempty();
     c->reader = redisReaderCreate();
@@ -810,6 +832,17 @@ int redisBufferRead(redisContext *c) {
     } else if (nread == 0) {
         __redisSetError(c,REDIS_ERR_EOF,"Server closed the connection");
         return REDIS_ERR;
+#if !SKIP_SSL_EVERYTHING
+    } else if (c->ssl) {
+        /* clears buffers */
+        if (ssl_on_read_cb(c->ssl, buf, nread) == -1) {
+            __redisSetError(c,REDIS_ERR_OTHER,"ssl error");
+            return REDIS_ERR;
+        }
+        if (!c->ssl->handshake_done && sdslen(c->ssl->write_buf) && ssl_do_sock_write(c->ssl, 0) == -1) {
+            return REDIS_ERR;
+        }
+#endif
     } else {
         if (redisReaderFeed(c->reader,buf,nread) != REDIS_OK) {
             __redisSetError(c,c->reader->err,c->reader->errstr);
@@ -835,6 +868,23 @@ int redisBufferWrite(redisContext *c, int *done) {
     if (c->err)
         return REDIS_ERR;
 
+#if !SKIP_SSL_EVERYTHING
+    if (c->ssl != NULL) {
+        if (sdslen(c->obuf) > 0) {
+            /* don't clear here */
+            ssl_buffer_unencrypted(c->ssl, c->obuf, sdslen(c->obuf), 0);
+            /* because we'll clear here :P */
+            _ssl_consume_buf(&c->obuf, sdslen(c->obuf));
+        }
+        if (sdslen(c->ssl->encrypt_buf) > 0) {
+            ssl_do_encrypt(c->ssl);
+        }
+        if (sdslen(c->ssl->write_buf) > 0 && ssl_do_sock_write(c->ssl, 1) == -1) {
+            return REDIS_ERR;
+        }
+        if (done != NULL) *done = (sdslen(c->ssl->write_buf) == 0);
+    } else {
+#endif
     if (sdslen(c->obuf) > 0) {
         nwritten = write(c->fd,c->obuf,sdslen(c->obuf));
         if (nwritten == -1) {
@@ -854,6 +904,9 @@ int redisBufferWrite(redisContext *c, int *done) {
         }
     }
     if (done != NULL) *done = (sdslen(c->obuf) == 0);
+#if !SKIP_SSL_EVERYTHING
+    }
+#endif
     return REDIS_OK;
 }
 

@@ -20,6 +20,35 @@ If you want to know more, this is a list of selected starting points:
 * The full list of Redis commands. http://redis.io/commands
 * There is much more inside the Redis official documentation. http://redis.io/documentation
 
+Getting OpenSSL before building
+-------------------------------
+
+To build Redis with OpenSSL integrated (this fork), you will need to have a
+recent version of OpenSSL to link against. I've been developing against OpenSSL
+1.1.0h as of this release, and this will likely be updated. I have not tried to
+get Redis/redis-benchmark compiling against system libraries, because my system
+is stuck on older versions that aren't supported by the OpenSSL team anymore.
+
+To get Redis ready for compilation, you should download the OpenSSL source code
+from https://www.openssl.org/source/, untar it, then add an 'openssl' symlink to
+deps to refer to it:
+
+    % cd /projects/redis/deps/
+    % wget https://www.openssl.org/source/openssl-1.1.0h.tar.gz
+    % wget https://www.openssl.org/source/openssl-1.1.0h.tar.gz.asc
+    % gpg --fetch-keys "gpg --fetch-keys "http://pool.sks-keyservers.net:11371/pks/lookup?op=get&search=0x8657ABB260F056B1E5190839D9C4D26D0E604491"
+    % gpg --verify openssl-1.1.0h.tar.gz.asc
+    % tar -xzf openssl-1.1.0h.tar.gz
+    % ln -s openssl-1.1.0h openssl
+    % cd ..
+
+Hint: first-time compilation of OpenSSL can take a couple minutes, as can
+rebuilds after `make clean` or `make distclean` in the base Redis path. You can
+speed this up substantially by tossing an appropriate `-j` argument to the
+`make` call in `deps/Makefile`, assuming your machine has the power. Fwiw,
+`-j32` on a 16 core/32 thread box compiles OpenSSL in about 10 seconds.
+
+
 Building Redis
 --------------
 

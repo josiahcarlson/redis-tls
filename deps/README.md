@@ -61,6 +61,43 @@ and our version:
 
 1. Makefile is modified to allow a different compiler than GCC.
 2. We have the implementation source code, and directly link to the following external libraries: `lua_cjson.o`, `lua_struct.o`, `lua_cmsgpack.o` and `lua_bit.o`.
-3. There is a security fix in `ldo.c`, line 498: The check for `LUA_SIGNATURE[0]` is removed in order toa void direct bytecode exectuion.
+3. There is a security fix in `ldo.c`, line 498: The check for `LUA_SIGNATURE[0]` is removed in order to avoid direct bytecode exectuion.
 
+Libressl
+---
 
+Generally, it probably makes sense to run the most recently released version of Libressl or Openssl that you can get your hands on. For Libressl:
+
+1. Head to the Libressl public release site: https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/
+2. Download the most recent .tar.gz version (2.7.2 as of this writing)
+3. Verify the signature: https://www.libressl.org/signing.html
+4. Extract it into `deps/libressl-<version>`
+5. Create a 'libressl' symlink in deps, e.g. `ln -s libressl-<version> libressl`
+6. While in 'deps', `make libressl`
+7. Test Libressl: `cd libressl && make check`
+8. Go into `deps/hiredis/Makefile` and make sure the 'libressl' pieces are uncommented, while the 'openssl' pieces are commented
+9. Go into `src/Makefile` and make sure the 'libressl' pieces are uncommented, while the 'openssl' pieces are commented
+10. Rebuild hiredis: `make hiredis`
+11. Rebuild anything that depends on hiredis
+
+OpenSSL
+---
+
+Generally, it probably makes sense to run the most recently released version of Libressl or Openssl that you can get your hands on. For OpenSSL:
+
+1. Head to the OpenSSL public release site: https://www.openssl.org/source/
+2. Download the most recent .tar.gz release (1.0.1h as of this writing)
+3. Verify the signature: https://www.openssl.org/community/omc.html
+4. Extract it into `deps/openssl-<version>`
+5. Create a 'openssl' symlink in deps, e.g. `ln -s openssl-<version> openssl`
+6. While in 'deps', `make openssl`
+7. Test Openssl: `cd openssl && make test`
+8. Go into `deps/hiredis/Makefile` and make sure the 'openssl' pieces are uncommented, while the 'libressl' pieces are commented
+9. Go into `src/Makefile` and make sure the 'openssl' pieces are uncommented, while the 'libressl' pieces are commented
+10. Rebuild hiredis: `make hiredis`
+11. Rebuild anything that depends on hiredis
+
+Libressl vs. OpenSSL
+---
+
+Use whichever one you want. Both seem to work within a few percentage of each other in terms of performance.

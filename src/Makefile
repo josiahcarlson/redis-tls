@@ -16,7 +16,7 @@ release_hdr := $(shell sh -c './mkreleasehdr.sh')
 uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 uname_M := $(shell sh -c 'uname -m 2>/dev/null || echo not')
 OPTIMIZATION?=-O2
-DEPENDENCY_TARGETS=hiredis linenoise lua
+DEPENDENCY_TARGETS=openssl linenoise lua hiredis
 NODEPS:=clean distclean
 
 # Default settings
@@ -79,7 +79,7 @@ ifeq ($(uname_S),SunOS)
 	export CFLAGS LDFLAGS DEBUG DEBUG_FLAGS
 	INSTALL=cp -pf
 	FINAL_CFLAGS+= -D__EXTENSIONS__ -D_XPG6
-	FINAL_LIBS+= -ldl -lnsl -lsocket -lresolv -lpthread -lrt
+	FINAL_LIBS+= -ldl -lnsl -lsocket -lresolv -lpthread -lrt -lutil
 else
 ifeq ($(uname_S),Darwin)
 	# Darwin
@@ -106,8 +106,21 @@ endif
 endif
 endif
 endif
+
 # Include paths to dependencies
 FINAL_CFLAGS+= -I../deps/hiredis -I../deps/linenoise -I../deps/lua/src
+FINAL_LDFLAGS+= -Xlinker -export-dynamic
+
+# Uncomment the following lines if you are using Libressl
+#FINAL_CFLAGS+= -DUSING_LIBRESSL
+#FINAL_LDFLAGS+= -L../deps/libressl/crypto/.libs/ -lcrypto -L../deps/libressl/ssl/.libs/ -lssl
+#FINAL_LIBS+=../deps/libressl/ssl/.libs/libssl.a ../deps/libressl/crypto/.libs/libcrypto.a -lpthread -lutil -ldl
+#DEPENDENCY_TARGETS+= libressl
+# comment the above, and uncomment the below if you are using OpenSSL
+FINAL_CFLAGS+= -DUSING_OPENSSL -I ../deps/openssl/include
+FINAL_LDFLAGS+= -L../deps/openssl/ -lcrypto -lssl
+FINAL_LIBS+= ../deps/openssl/libssl.a ../deps/openssl/libcrypto.a -lpthread -lutil -ldl
+
 
 ifeq ($(MALLOC),tcmalloc)
 	FINAL_CFLAGS+= -DUSE_TCMALLOC

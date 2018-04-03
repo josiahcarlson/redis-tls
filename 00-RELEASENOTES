@@ -11,6 +11,18 @@ CRITICAL: There is a critical bug affecting MOST USERS. Upgrade ASAP.
 --------------------------------------------------------------------------------
 
 ================================================================================
+Redis 4.0.9+ssl Released Thu Apr 26 7:30:00 PDT 2018
+================================================================================
+
+This release of the benchmark-ssl branch includes support for more metrics and
+SSL/TLS supporting redis-benchmark and hiredis. Future releases will include
+this functionality extended to redis-server (done), redis-cluster (done),
+redis-sentinel, and redis-cli. Existing unittests are already converted.
+
+For more information on this branch, this release, and future releases, please
+visit my blog http://www.dr-josiah.com .
+
+================================================================================
 Redis 4.0.9     Released Mon Mar 26 17:52:32 CEST 2018
 ================================================================================
 

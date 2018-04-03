@@ -37,6 +37,8 @@ distclean:
 	-(cd linenoise && $(MAKE) clean) > /dev/null || true
 	-(cd lua && $(MAKE) clean) > /dev/null || true
 	-(cd jemalloc && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
+	-(cd openssl && $(MAKE) clean) > /dev/null || true
+	-(cd libressl && $(MAKE) clean) > /dev/null || true
 	-(rm -f .make-*)
 
 .PHONY: distclean
@@ -52,6 +54,20 @@ linenoise: .make-prerequisites
 	cd linenoise && $(MAKE)
 
 .PHONY: linenoise
+
+libressl: .make-prerequisites
+	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
+	cd libressl && ./configure && make
+
+.PHONY: libressl
+
+openssl: .make-prerequisites
+	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
+	cd openssl && ./config && make
+
+.PHONY: openssl
+
+.PHONY: lua
 
 ifeq ($(uname_S),SunOS)
 	# Make isinf() available

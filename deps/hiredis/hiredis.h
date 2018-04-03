@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2014, Pieter Noordhuis <pcnoordhuis at gmail dot com>
  * Copyright (c) 2015, Matt Stancliff <matt at genges dot com>,
  *                     Jan-Erik Rediger <janerik at fnordig dot com>
+ * Copyright (c) 2018, Josiah Carlson <josiah dot carlson at gmail dot com>
  *
  * All rights reserved.
  *
@@ -31,6 +32,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+
 #ifndef __HIREDIS_H
 #define __HIREDIS_H
 #include "read.h"
@@ -38,6 +40,7 @@
 #include <sys/time.h> /* for struct timeval */
 #include <stdint.h> /* uintXX_t, etc */
 #include "sds.h" /* for sds */
+#include "ssl_hiredis.h"
 
 #define HIREDIS_MAJOR 0
 #define HIREDIS_MINOR 13
@@ -157,6 +160,10 @@ typedef struct redisContext {
     struct {
         char *path;
     } unix_sock;
+
+#if !SKIP_SSL_EVERYTHING
+    struct ssl_client *ssl;
+#endif
 
 } redisContext;
 

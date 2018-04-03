@@ -1,5 +1,7 @@
 .*.swp
 *.o
+*.so
+*.a
 *.log
 dump.rdb
 redis-benchmark
