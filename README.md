@@ -1,3 +1,15 @@
+BEFORE YOU GO ANY FURTHER
+-------------------------
+
+This is a fork of Redis. At some point it will have a new name, and actual code you'd want to run (there's a funny story about that, which I'll provide a link to when I have the video ready). Until then, the only interesting stuff are the most recent few commits, and a link back to Salvatore's Redis Github repository: https://github.com/antirez/redis . That has what you're looking for, I'm sure.
+
+Old readme follows
+------------------
+
+
+
+
+
 This README is just a fast *quick start* document. You can find more detailed documentation at [redis.io](https://redis.io).
 
 What is Redis?
